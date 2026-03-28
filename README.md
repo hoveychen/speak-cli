@@ -38,19 +38,27 @@ talk --output hello.wav "Save to file"
 
 ## Installation
 
-### Download binary (recommended)
+### One-line install (recommended)
 
+**macOS:**
 ```bash
-# macOS Apple Silicon
-curl -fL https://github.com/hoveychen/talk-cli/releases/latest/download/talk-darwin-arm64 -o talk
-chmod +x talk && sudo mv talk /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/hoveychen/talk-cli/main/install.sh | bash
+```
 
-# macOS Intel
-curl -fL https://github.com/hoveychen/talk-cli/releases/latest/download/talk-darwin-amd64 -o talk
-chmod +x talk && sudo mv talk /usr/local/bin/
+**Windows (PowerShell):**
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/hoveychen/talk-cli/main/install.ps1 | iex"
+```
 
-# Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/hoveychen/talk-cli/releases/latest/download/talk-windows-amd64.exe -OutFile talk.exe
+Auto-detects your platform and architecture, installs to `~/.local/bin` (macOS) or `%LOCALAPPDATA%\talk-cli\bin` (Windows), and adds it to your PATH automatically.
+
+To install a specific version or change the install directory:
+```bash
+# macOS
+TALK_VERSION=v0.2.0 TALK_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/hoveychen/talk-cli/main/install.sh | bash
+
+# Windows
+$env:TALK_VERSION="v0.2.0"; $env:TALK_INSTALL_DIR="C:\Tools"; powershell -c "irm https://raw.githubusercontent.com/hoveychen/talk-cli/main/install.ps1 | iex"
 ```
 
 ### Build from source

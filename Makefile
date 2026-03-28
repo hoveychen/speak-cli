@@ -17,8 +17,6 @@ all: build
 build:
 	@echo "→ Building talk..."
 	@mkdir -p bin
-	@go build -ldflags="-s -w" \
-	    -o bin/talk                   ./cmd/talk
 	@GOOS=darwin  GOARCH=arm64 go build -ldflags="-s -w" \
 	    -o bin/talk-darwin-arm64      ./cmd/talk
 	@GOOS=darwin  GOARCH=amd64 go build -ldflags="-s -w" \
