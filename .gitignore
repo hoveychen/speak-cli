@@ -28,4 +28,4 @@ engine/.venv*/
 npm/bin/
 node_modules/
 *.tgz
-speak
+/speak
