@@ -21,6 +21,10 @@ engine/dist-*/
 engine/.venv*/
 *.pyc
 
+# Embedded listener binaries (copied at build time, not checked in)
+internal/listener/speak-listen
+internal/listener/speak-listen.exe
+
 # Go test binaries
 *.test
 

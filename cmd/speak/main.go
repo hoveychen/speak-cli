@@ -20,6 +20,7 @@ import (
 	"os"
 	"text/tabwriter"
 
+	"github.com/hoveychen/speak-cli/internal/listener"
 	"github.com/hoveychen/speak-cli/internal/player"
 	"github.com/hoveychen/speak-cli/internal/runner"
 	"github.com/hoveychen/speak-cli/internal/voices"
@@ -75,6 +76,7 @@ Run "speak init" to pre-download assets before going offline.`,
 
 	root.AddCommand(buildVoicesCmd(&noProgress))
 	root.AddCommand(buildInitCmd(&noProgress))
+	root.AddCommand(buildListenCmd())
 	return root
 }
 
@@ -85,6 +87,7 @@ func speak(text, lang, voice string, speed float64, output string, noProgress bo
 	if err != nil {
 		return err
 	}
+	defer r.Close()
 
 	wavPath, err := r.Speak(text, voice, speed, output)
 	if err != nil {
@@ -158,6 +161,46 @@ func initAssets(lang string, noProgress bool) error {
 		fmt.Fprintf(os.Stderr, "✓ %s ready\n", l)
 	}
 	return nil
+}
+
+// ── listen command ───────────────────────────────────────────────────────
+
+func buildListenCmd() *cobra.Command {
+	var (
+		lang           string
+		silenceTimeout float64
+		maxDuration    float64
+		daemon         bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "listen",
+		Short: "Listen to microphone and transcribe speech",
+		Long: `Listen to the microphone using the system's native speech recognition
+and output the transcribed text as JSON to stdout.
+
+A floating subtitle overlay shows real-time transcription on screen.
+A chime plays when recording begins. The result is finalized after a
+period of silence or when the user presses Enter (interactive mode).
+
+Use --daemon to start a background listener service. Any subsequent
+"speak listen" call (from any terminal, IDE, or AI tool) will connect
+to the daemon via Unix socket, inheriting its microphone permission.`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if daemon {
+				return listener.StartDaemon(lang)
+			}
+			return listener.Listen(lang, silenceTimeout, maxDuration)
+		},
+	}
+
+	cmd.Flags().StringVar(&lang, "lang", "auto", "Language: auto, en, zh, ja, es, fr, ko")
+	cmd.Flags().Float64Var(&silenceTimeout, "silence-timeout", 2.0, "Stop after N seconds of silence")
+	cmd.Flags().Float64Var(&maxDuration, "max-duration", 60.0, "Maximum recording duration in seconds")
+	cmd.Flags().BoolVar(&daemon, "daemon", false, "Run as a background listener daemon")
+
+	return cmd
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

@@ -6,13 +6,16 @@
 package runner
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/hoveychen/speak-cli/internal/assets"
 	"github.com/hoveychen/speak-cli/internal/downloader"
@@ -34,6 +37,7 @@ type Runner struct {
 	voicesPath string // empty for MLX
 	configPath string // non-empty for zh ONNX (Bopomofo vocab config)
 	lang       string // "en" or "zh"
+	cacheDir   string // cache directory for socket files
 }
 
 // defaultCacheDir returns the platform cache directory for speak-cli.
@@ -99,7 +103,7 @@ func New(lang string, opts Options) (*Runner, error) {
 		}
 	}
 
-	r := &Runner{lang: lang}
+	r := &Runner{lang: lang, cacheDir: cacheDir}
 
 	// On darwin/arm64, prefer MLX for English; fall back to ONNX on failure.
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && lang == "en" {
@@ -138,66 +142,143 @@ func (r *Runner) Speak(text, voice string, speed float64, outputPath string) (st
 		outputPath = f.Name()
 	}
 
-	args := r.speakArgs(text, voice, speed, outputPath)
-	if err := r.run(args...); err != nil {
+	if err := r.ensureDaemon(); err != nil {
+		return "", err
+	}
+
+	resp, err := r.daemonSpeak(text, voice, speed, outputPath)
+	if err != nil || (resp != nil && !resp.OK) {
 		if r.useMLX {
-			// MLX failed at runtime (e.g. Metal unavailable); fall back to ONNX.
 			fmt.Fprintf(os.Stderr, "MLX inference failed, falling back to ONNX.\n")
 			os.Remove(outputPath)
+			r.shutdownDaemon()
 			if fallbackErr := r.fallbackToONNX(); fallbackErr != nil {
 				return "", fmt.Errorf("MLX failed and ONNX fallback also failed: %w", fallbackErr)
 			}
-			args = r.speakArgs(text, voice, speed, outputPath)
-			if err2 := r.run(args...); err2 != nil {
+			if err := r.ensureDaemon(); err != nil {
+				return "", err
+			}
+			resp, err = r.daemonSpeak(text, voice, speed, outputPath)
+			if err != nil {
 				os.Remove(outputPath)
-				return "", err2
+				return "", err
+			}
+			if !resp.OK {
+				os.Remove(outputPath)
+				return "", fmt.Errorf("engine error: %s", resp.Error)
 			}
 			return outputPath, nil
 		}
 		os.Remove(outputPath)
-		return "", err
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("engine error: %s", resp.Error)
 	}
 	return outputPath, nil
 }
 
+// Close is a no-op. The daemon runs independently and shuts down via idle timeout.
+func (r *Runner) Close() {}
+
 // fallbackToONNX switches the runner from MLX to the ONNX engine in-place.
 // It downloads/verifies the ONNX engine and model if needed.
 func (r *Runner) fallbackToONNX() error {
-	cacheDir, err := defaultCacheDir()
-	if err != nil {
-		return err
-	}
 	r.useMLX = false
-	if err := r.ensureEngine(cacheDir, true); err != nil {
+	if err := r.ensureEngine(r.cacheDir, true); err != nil {
 		return fmt.Errorf("ONNX engine: %w", err)
 	}
-	return r.ensureModel(cacheDir, true)
+	return r.ensureModel(r.cacheDir, true)
 }
 
-// ── internal ──────────────────────────────────────────────────────────────────
+// ── daemon management (Unix socket) ──────────────────────────────────────────
 
-func (r *Runner) speakArgs(text, voice string, speed float64, outputPath string) []string {
+// daemonResponse is the JSON structure returned by the engine daemon.
+type daemonResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+	ID    string `json:"id,omitempty"`
+}
+
+// sockPath returns the Unix socket path for the current engine configuration.
+func (r *Runner) sockPath() string {
+	variant := "onnx"
 	if r.useMLX {
-		return []string{
-			"speak",
-			"--text", text,
-			"--voice", voice,
-			"--speed", fmt.Sprintf("%.2f", speed),
-			"--output", outputPath,
-		}
+		variant = "mlx"
+	}
+	return filepath.Join(r.cacheDir, fmt.Sprintf("daemon-%s-%s.sock", variant, modelLang(r.lang)))
+}
+
+// ensureDaemon checks if a daemon is already listening on the socket; if not,
+// it starts one and waits until it is ready.
+func (r *Runner) ensureDaemon() error {
+	sock := r.sockPath()
+
+	// Try connecting to an existing daemon.
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err == nil {
+		conn.Close()
+		return nil // daemon is already running
 	}
 
-	langCode := engineLangCode(r.lang)
+	// No daemon running — clean up stale socket and start a new one.
+	os.Remove(sock) //nolint:errcheck
 
+	return r.startDaemon(sock)
+}
+
+// startDaemon launches the engine in serve mode and waits for the ready signal.
+func (r *Runner) startDaemon(sock string) error {
+	args := r.serveArgs(sock)
+	cmd := exec.Command(r.engineExe, args...) //nolint:gosec
+	cmd.Stderr = os.Stderr
+
+	// We read stdout only for the ready signal, then let the daemon run detached.
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("creating stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting engine daemon: %w", err)
+	}
+
+	// Release the process so it isn't reaped when this Go process exits.
+	go func() { cmd.Wait() }() //nolint:errcheck
+
+	scanner := bufio.NewScanner(stdoutPipe)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	// Wait for the ready signal.
+	if !scanner.Scan() {
+		cmd.Process.Kill() //nolint:errcheck
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("engine daemon failed to start: %w", err)
+		}
+		return fmt.Errorf("engine daemon exited before becoming ready")
+	}
+
+	var ready struct {
+		Ready bool `json:"ready"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil || !ready.Ready {
+		cmd.Process.Kill() //nolint:errcheck
+		return fmt.Errorf("engine daemon sent unexpected ready signal: %s", scanner.Text())
+	}
+
+	return nil
+}
+
+// serveArgs returns the command-line arguments for the serve subcommand.
+func (r *Runner) serveArgs(sock string) []string {
+	if r.useMLX {
+		return []string{"serve", "--sock", sock}
+	}
 	args := []string{
-		"speak",
+		"serve",
 		"--model", r.modelPath,
 		"--voices", r.voicesPath,
-		"--text", text,
-		"--voice", voice,
-		"--speed", fmt.Sprintf("%.2f", speed),
-		"--lang", langCode,
-		"--output", outputPath,
+		"--sock", sock,
 	}
 	if r.configPath != "" {
 		args = append(args, "--config", r.configPath)
@@ -205,11 +286,68 @@ func (r *Runner) speakArgs(text, voice string, speed float64, outputPath string)
 	return args
 }
 
-func (r *Runner) run(args ...string) error {
-	cmd := exec.Command(r.engineExe, args...) //nolint:gosec
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+// daemonSpeak connects to the daemon socket, sends a speak request, and reads the response.
+func (r *Runner) daemonSpeak(text, voice string, speed float64, outputPath string) (*daemonResponse, error) {
+	req := map[string]interface{}{
+		"id":     "1",
+		"method": "speak",
+		"text":   text,
+		"voice":  voice,
+		"speed":  speed,
+		"lang":   engineLangCode(r.lang),
+		"output": outputPath,
+	}
+	return r.daemonRequest(req)
+}
+
+// daemonRequest connects to the daemon socket, sends a JSON request, and reads the response.
+func (r *Runner) daemonRequest(req map[string]interface{}) (*daemonResponse, error) {
+	sock := r.sockPath()
+
+	conn, err := net.DialTimeout("unix", sock, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to engine daemon: %w", err)
+	}
+	defer conn.Close()
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling request: %w", err)
+	}
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		return nil, fmt.Errorf("writing to engine daemon: %w", err)
+	}
+
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("reading from engine daemon: %w", err)
+		}
+		return nil, fmt.Errorf("engine daemon closed connection without response")
+	}
+
+	var resp daemonResponse
+	if err := json.Unmarshal(scanner.Bytes(), &resp); err != nil {
+		return nil, fmt.Errorf("parsing engine response: %w", err)
+	}
+	return &resp, nil
+}
+
+// shutdownDaemon sends a shutdown request to the daemon. Best-effort.
+func (r *Runner) shutdownDaemon() {
+	sock := r.sockPath()
+	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	req, _ := json.Marshal(map[string]interface{}{
+		"id": "shutdown", "method": "shutdown",
+	})
+	req = append(req, '\n')
+	conn.Write(req) //nolint:errcheck
 }
 
 // ── engine management ─────────────────────────────────────────────────────────

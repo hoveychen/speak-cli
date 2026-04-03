@@ -1,28 +1,106 @@
 name: CLI Release
 
 # Triggered by pushing a version tag like "v0.2.0".
-# Builds the tiny speak CLI binary (no embedded assets) for all platforms
-# and publishes it as a GitHub Release.
+# Builds speak CLI with embedded listener for each platform,
+# then publishes as a GitHub Release and to npm.
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', '!engine-v*']
   workflow_dispatch:
 
 jobs:
-  build:
+  build-darwin-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build listener (Swift)
+        run: |
+          mkdir -p bin
+          swiftc listen/listen_darwin.swift \
+            -o bin/speak-listen \
+            -framework Cocoa -framework Speech -framework AVFoundation \
+            -O -target arm64-apple-macos13
+          cp bin/speak-listen internal/listener/speak-listen
+
+      - name: Build speak CLI
+        run: GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o bin/speak-darwin-arm64 ./cmd/speak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speak-darwin-arm64
+          path: bin/speak-darwin-arm64
+
+  build-darwin-amd64:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build listener (Swift)
+        run: |
+          mkdir -p bin
+          swiftc listen/listen_darwin.swift \
+            -o bin/speak-listen \
+            -framework Cocoa -framework Speech -framework AVFoundation \
+            -O -target x86_64-apple-macos13
+          cp bin/speak-listen internal/listener/speak-listen
+
+      - name: Build speak CLI
+        run: GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o bin/speak-darwin-amd64 ./cmd/speak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speak-darwin-amd64
+          path: bin/speak-darwin-amd64
+
+  build-windows-amd64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build listener (C#)
+        shell: cmd
+        run: |
+          mkdir bin 2>nul
+          %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /optimize /target:winexe ^
+            /r:System.Speech.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
+            /out:bin\speak-listen.exe listen\listen_windows.cs
+          copy bin\speak-listen.exe internal\listener\speak-listen.exe
+
+      - name: Build speak CLI
+        shell: bash
+        run: GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o bin/speak-windows-amd64.exe ./cmd/speak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speak-windows-amd64
+          path: bin/speak-windows-amd64.exe
+
+  release:
+    needs: [build-darwin-arm64, build-darwin-amd64, build-windows-amd64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/download-artifact@v4
         with:
-          go-version: '1.22'
+          path: bin/
+          merge-multiple: true
 
-      - name: Build speak CLI
-        run: make build
+      - name: Make binaries executable
+        run: chmod +x bin/speak-darwin-*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -31,12 +109,13 @@ jobs:
           body: |
             ## speak  ${{ github.ref_name }}
 
-            Multilingual TTS CLI powered by Kokoro.
+            Multilingual TTS CLI powered by Kokoro, with built-in speech recognition.
             Engine and model are downloaded automatically on first use.
+            The listener binary is embedded — no extra downloads needed for `speak listen`.
 
             | Binary | Platform |
             |--------|----------|
-            | `speak-darwin-arm64` | macOS Apple Silicon (MLX + ONNX) |
+            | `speak-darwin-arm64` | macOS Apple Silicon |
             | `speak-darwin-amd64` | macOS Intel |
             | `speak-windows-amd64.exe` | Windows |
 
@@ -44,20 +123,19 @@ jobs:
 
             ```bash
             # macOS Apple Silicon
+            curl -fsSL https://raw.githubusercontent.com/hoveychen/speak-cli/main/install.sh | bash
+
+            # Or manual download
             curl -fL https://github.com/hoveychen/speak-cli/releases/latest/download/speak-darwin-arm64 -o speak
             chmod +x speak
 
             ./speak "Hello, world!"
-            ./speak "你好，欢迎使用 speak-cli"
-            ./speak voices --lang zh
-            ./speak init --lang all   # pre-download everything
+            ./speak listen --lang zh   # speech recognition
             ```
-
-            Engine and model are cached in `~/.cache/speak-cli/` after first download.
           files: bin/*
 
   npm-publish:
-    needs: build
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: read

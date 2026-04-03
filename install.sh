@@ -85,6 +85,53 @@ mv "$TMP_FILE" "$DEST"
 chmod +x "$DEST"
 ok "Installed to $DEST"
 
+# ── listener daemon (macOS only) ─────────────────────────────────────────────
+# The listener binary is embedded in speak. We set up a LaunchAgent so the
+# daemon starts automatically at login and any caller (VS Code, AI tools, etc.)
+# can use speech recognition without needing microphone permission themselves.
+if [ "$OS" = "Darwin" ]; then
+  PLIST_DIR="$HOME/Library/LaunchAgents"
+  PLIST_LABEL="com.speak-cli.listener"
+  PLIST_FILE="$PLIST_DIR/$PLIST_LABEL.plist"
+  LOG_DIR="$HOME/Library/Logs/speak-cli"
+  mkdir -p "$PLIST_DIR" "$LOG_DIR"
+
+  cat > "$PLIST_FILE" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${PLIST_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${DEST}</string>
+    <string>listen</string>
+    <string>--daemon</string>
+    <string>--lang</string>
+    <string>auto</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/listener.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/listener.log</string>
+</dict>
+</plist>
+PLIST
+
+  # Stop existing daemon if running, then start the new one.
+  launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE"
+  ok "Listener daemon installed and started"
+  info "Logs: $LOG_DIR/listener.log"
+  info "Stop:  launchctl bootout gui/\$(id -u)/$PLIST_LABEL"
+fi
+
 # ── PATH check ────────────────────────────────────────────────────────────────
 case ":$PATH:" in
   *":$INSTALL_DIR:"*)

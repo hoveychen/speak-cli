@@ -9,7 +9,7 @@ import "fmt"
 const (
 	// EngineTag is the GitHub Release tag under which engine tarballs are published.
 	// Changing this constant causes all clients to re-download the new engine.
-	EngineTag = "engine-v0.1.0"
+	EngineTag = "engine-v0.2.0"
 
 	// GHReleasesBase is the GitHub Releases download URL prefix.
 	GHReleasesBase = "https://github.com/hoveychen/speak-cli/releases/download"

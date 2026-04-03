@@ -4,7 +4,7 @@ MODULE := github.com/hoveychen/speak-cli
 HOST_OS   := $(shell go env GOOS)
 HOST_ARCH := $(shell go env GOARCH)
 
-.PHONY: all build build-engine-darwin build-engine-darwin-mlx build-engine-windows \
+.PHONY: all build build-listener build-engine-darwin build-engine-darwin-mlx build-engine-windows \
         release-engines upload-models clean
 
 # ─── Default ─────────────────────────────────────────────────────────────────
@@ -14,6 +14,7 @@ all: build
 # ─── Go build ────────────────────────────────────────────────────────────────
 
 # Build the speak CLI for all supported platforms.
+# Listener binaries must be pre-built in internal/listener/ for embedding.
 build:
 	@echo "→ Building speak..."
 	@mkdir -p bin
@@ -24,6 +25,35 @@ build:
 	@GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" \
 	    -o bin/speak-windows-amd64.exe ./cmd/speak
 	@echo "✓ speak binaries in bin/"
+
+# Build everything for the current platform (listener + Go CLI with embed).
+build-all: build-listener embed-listener build
+
+# Copy listener binary into internal/listener/ for Go embed.
+embed-listener:
+ifeq ($(HOST_OS),darwin)
+	@cp bin/speak-listen internal/listener/speak-listen
+	@echo "✓ speak-listen embedded for darwin"
+else ifeq ($(HOST_OS),windows)
+	@cp bin/speak-listen.exe internal/listener/speak-listen.exe
+	@echo "✓ speak-listen.exe embedded for windows"
+endif
+
+# ─── Listener (native ASR) ───────────────────────────────────────────────
+
+# Build the native speech-recognition binary for the current platform.
+build-listener:
+ifeq ($(HOST_OS),darwin)
+	@echo "→ Building macOS listener ($(HOST_ARCH))..."
+	@mkdir -p bin
+	@swiftc listen/listen_darwin.swift \
+	    -o bin/speak-listen \
+	    -framework Cocoa -framework Speech -framework AVFoundation \
+	    -O -target $(HOST_ARCH)-apple-macos13
+	@echo "✓ bin/speak-listen"
+else
+	@echo "⚠ Use scripts\\build-listener-windows.bat on Windows"
+endif
 
 # ─── Engine builds ───────────────────────────────────────────────────────────
 
