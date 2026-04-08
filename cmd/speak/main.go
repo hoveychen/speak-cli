@@ -77,6 +77,7 @@ Run "speak init" to pre-download assets before going offline.`,
 	root.AddCommand(buildVoicesCmd(&noProgress))
 	root.AddCommand(buildInitCmd(&noProgress))
 	root.AddCommand(buildListenCmd())
+	root.AddCommand(buildAskCmd(&noProgress))
 	return root
 }
 
@@ -199,6 +200,57 @@ to the daemon via Unix socket, inheriting its microphone permission.`,
 	cmd.Flags().Float64Var(&silenceTimeout, "silence-timeout", 2.0, "Stop after N seconds of silence")
 	cmd.Flags().Float64Var(&maxDuration, "max-duration", 60.0, "Maximum recording duration in seconds")
 	cmd.Flags().BoolVar(&daemon, "daemon", false, "Run as a background listener daemon")
+
+	return cmd
+}
+
+// ── ask command ──────────────────────────────────────────────────────────
+
+func buildAskCmd(noProgress *bool) *cobra.Command {
+	var (
+		lang           string
+		voice          string
+		speed          float64
+		silenceTimeout float64
+		maxDuration    float64
+	)
+
+	cmd := &cobra.Command{
+		Use:   "ask <question>",
+		Short: "Speak a question then listen for the answer",
+		Long: `Ask speaks the given question aloud using TTS, then immediately
+starts listening for the user's spoken answer via native speech recognition.
+
+A chime plays when recording begins. The transcribed answer is written
+as JSON to stdout.
+
+Example:
+  speak ask "What is your name?"
+  speak ask --lang zh "你叫什么名字？"`,
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			question := args[0]
+			resolvedLang := resolveLang(lang, question)
+			if voice == "" {
+				voice = voices.DefaultFor(resolvedLang)
+			}
+
+			// Step 1: speak the question.
+			if err := speak(question, resolvedLang, voice, speed, "", *noProgress); err != nil {
+				return fmt.Errorf("speaking question: %w", err)
+			}
+
+			// Step 2: listen for the answer (chime plays automatically).
+			return listener.Listen(resolvedLang, silenceTimeout, maxDuration)
+		},
+	}
+
+	cmd.Flags().StringVar(&lang, "lang", "auto", "Language: auto, en, zh, ja, es, fr, ko")
+	cmd.Flags().StringVarP(&voice, "voice", "v", "", "Voice name (default depends on language)")
+	cmd.Flags().Float64VarP(&speed, "speed", "s", 1.0, "Speed multiplier (0.5–2.0)")
+	cmd.Flags().Float64Var(&silenceTimeout, "silence-timeout", 2.0, "Stop after N seconds of silence")
+	cmd.Flags().Float64Var(&maxDuration, "max-duration", 60.0, "Maximum recording duration in seconds")
 
 	return cmd
 }
